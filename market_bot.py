@@ -12,12 +12,10 @@ BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 app = Flask(__name__)
 
-# ---------- WEB SERVER ----------
 @app.route("/")
 def home():
     return "Trading Bot Running!"
 
-# ---------- PAIRS ----------
 pairs = {
     "EURUSD": ("EUR", "USD"),
     "USDJPY": ("USD", "JPY"),
@@ -26,6 +24,7 @@ pairs = {
 }
 
 trade = {}
+alerts = []
 
 # ---------- TELEGRAM ----------
 def get_updates(offset=None):
@@ -50,58 +49,50 @@ def btc_price():
     url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
     return float(requests.get(url).json()["price"])
 
-# ---------- PARSE TRADE ----------
-def parse_trade(text):
-    pattern = r"(BUY|SELL)\s+([A-Z]{6})\s+([\d\.]+)\s+TP\s+([\d\.]+)\s+SL\s+([\d\.]+)"
-    match = re.match(pattern, text)
+def get_price(pair):
+    if pair == "BTCUSD":
+        return btc_price()
 
-    if not match:
-        return None
+    if pair in pairs:
+        frm, to = pairs[pair]
+        return forex_price(frm, to)
 
-    return {
-        "type": match.group(1),
-        "pair": match.group(2),
-        "entry": float(match.group(3)),
-        "tp": float(match.group(4)),
-        "sl": float(match.group(5)),
-    }
+    return None
 
-# ---------- ANALYZE ----------
-def analyze(tr, current):
-    entry = tr["entry"]
-    tp = tr["tp"]
-    sl = tr["sl"]
+# ---------- ALERTS ----------
+def check_alerts():
+    global alerts
 
-    if tr["type"] == "BUY":
-        profit = current - entry
-        tp_total = tp - entry
-    else:
-        profit = entry - current
-        tp_total = entry - tp
+    triggered = []
 
-    pips = profit * 10000
-    progress = (profit / tp_total * 100) if tp_total != 0 else 0
+    for alert in alerts:
+        current = get_price(alert["pair"])
 
-    status = "Neutral"
-    if profit > 0:
-        status = "In Profit 📈"
-    if progress >= 100:
-        status = "TP HIT 🎯"
+        if current is None:
+            continue
 
-    if tr["type"] == "BUY" and current <= sl:
-        status = "SL HIT 🛑"
+        hit = False
 
-    if tr["type"] == "SELL" and current >= sl:
-        status = "SL HIT 🛑"
+        if alert["direction"] == "above" and current >= alert["target"]:
+            hit = True
 
-    return pips, progress, status
+        if alert["direction"] == "below" and current <= alert["target"]:
+            hit = True
 
-# ---------- BOT LOOP ----------
+        if hit:
+            send(
+                alert["chat_id"],
+                f"🚨 {alert['pair']} reached {alert['target']}\nCurrent: {current}"
+            )
+            triggered.append(alert)
+
+    for item in triggered:
+        alerts.remove(item)
+
+# ---------- MAIN LOOP ----------
 def bot_loop():
-    global trade
     offset = None
-
-    print("Telegram trading bot started...")
+    print("Trading bot started...")
 
     while True:
         try:
@@ -117,51 +108,69 @@ def bot_loop():
                     chat_id = u["message"]["chat"]["id"]
                     text = u["message"].get("text", "").upper().strip()
 
-                    # SAVE TRADE
-                    parsed = parse_trade(text)
-                    if parsed:
-                        trade = parsed
-                        send(chat_id, f"✅ Trade saved: {parsed['pair']} {parsed['type']}")
-                        continue
+                    # ----- SET ALERT -----
+                    if text.startswith("ALERT"):
+                        parts = text.split()
 
-                    # BTC
-                    if text == "BTCUSD":
-                        price = btc_price()
-                        send(chat_id, f"📊 BTCUSD\n💰 Price: {price}")
-                        continue
+                        if len(parts) == 3:
+                            pair = parts[1]
+                            target = float(parts[2])
 
-                    # FOREX PAIRS
-                    if text in pairs:
-                        frm, to = pairs[text]
-                        current = forex_price(frm, to)
+                            current = get_price(pair)
 
-                        if trade and trade["pair"] == text:
-                            pips, prog, status = analyze(trade, current)
+                            if current is None:
+                                send(chat_id, "❌ Invalid pair")
+                                continue
 
-                            msg = f"""📊 {text} {trade['type']}
+                            direction = "above" if target > current else "below"
 
-Entry: {trade['entry']}
-Current: {current}
+                            alerts.append({
+                                "chat_id": chat_id,
+                                "pair": pair,
+                                "target": target,
+                                "direction": direction
+                            })
 
-💰 Profit: {pips:.1f} pips
-🎯 TP Progress: {prog:.1f}%
+                            send(
+                                chat_id,
+                                f"✅ Alert set for {pair} at {target}"
+                            )
+                            continue
 
-Status: {status}"""
+                    # ----- VIEW ALERTS -----
+                    if text == "ALERTS":
+                        if not alerts:
+                            send(chat_id, "No active alerts.")
                         else:
-                            msg = f"""📊 {text}
-💰 Price: {current}"""
-
-                        send(chat_id, msg)
+                            msg = "📌 Active Alerts:\n"
+                            for a in alerts:
+                                if a["chat_id"] == chat_id:
+                                    msg += f"{a['pair']} @ {a['target']}\n"
+                            send(chat_id, msg)
                         continue
 
-                    send(chat_id, "Send pair (EURUSD) or trade:\nBUY EURUSD 1.0850 TP 1.0900 SL 1.0800")
+                    # ----- CLEAR ALERTS -----
+                    if text == "CLEAR ALERTS":
+                        alerts = [a for a in alerts if a["chat_id"] != chat_id]
+                        send(chat_id, "🗑 Alerts cleared.")
+                        continue
+
+                    # ----- PRICE CHECK -----
+                    price = get_price(text)
+
+                    if price:
+                        send(chat_id, f"📊 {text}\n💰 Price: {price}")
+                        continue
+
+                    send(chat_id, "Send:\nEURUSD\nALERT EURUSD 1.0900")
+
+            check_alerts()
 
         except Exception as e:
             print("Error:", e)
 
-        time.sleep(1)
+        time.sleep(5)
 
-# ---------- START ----------
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
 
