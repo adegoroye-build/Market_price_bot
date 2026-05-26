@@ -2,7 +2,6 @@ import os
 import threading
 import time
 import requests
-import re
 from flask import Flask
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -16,15 +15,26 @@ app = Flask(__name__)
 def home():
     return "Trading Bot Running!"
 
+# ---------- PAIRS ----------
 pairs = {
     "EURUSD": ("EUR", "USD"),
+    "GBPUSD": ("GBP", "USD"),
     "USDJPY": ("USD", "JPY"),
+    "USDCHF": ("USD", "CHF"),
+    "USDCAD": ("USD", "CAD"),
+    "AUDUSD": ("AUD", "USD"),
     "NZDUSD": ("NZD", "USD"),
-    "GBPJPY": ("GBP", "JPY"),
-}
 
-trade = {}
-alerts = []
+    "EURJPY": ("EUR", "JPY"),
+    "GBPJPY": ("GBP", "JPY"),
+    "EURGBP": ("EUR", "GBP"),
+    "EURAUD": ("EUR", "AUD"),
+    "EURCAD": ("EUR", "CAD"),
+    "GBPAUD": ("GBP", "AUD"),
+    "AUDJPY": ("AUD", "JPY"),
+    "CADJPY": ("CAD", "JPY"),
+    "NZDJPY": ("NZD", "JPY"),
+}
 
 # ---------- TELEGRAM ----------
 def get_updates(offset=None):
@@ -41,17 +51,37 @@ def send(chat_id, text):
 
 # ---------- PRICE ----------
 def forex_price(frm, to):
-    url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={frm}&to_currency={to}&apikey={API_KEY}"
-    data = requests.get(url).json()
-    return float(data["Realtime Currency Exchange Rate"]["5. Exchange Rate"])
+    try:
+        url = f"https://www.alphavantage.co/query?function=CURRENCY_EXCHANGE_RATE&from_currency={frm}&to_currency={to}&apikey={API_KEY}"
+        data = requests.get(url, timeout=10).json()
+        rate = data["Realtime Currency Exchange Rate"]["5. Exchange Rate"]
+        return float(rate)
+    except Exception as e:
+        print("FX error:", e)
+        return None
 
 def btc_price():
-    url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
-    return float(requests.get(url).json()["price"])
+    try:
+        url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+        return float(requests.get(url, timeout=10).json()["price"])
+    except Exception as e:
+        print("BTC error:", e)
+        return None
+
+def eth_price():
+    try:
+        url = "https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT"
+        return float(requests.get(url, timeout=10).json()["price"])
+    except Exception as e:
+        print("ETH error:", e)
+        return None
 
 def get_price(pair):
     if pair == "BTCUSD":
         return btc_price()
+
+    if pair == "ETHUSD":
+        return eth_price()
 
     if pair in pairs:
         frm, to = pairs[pair]
@@ -59,40 +89,25 @@ def get_price(pair):
 
     return None
 
-# ---------- ALERTS ----------
-def check_alerts():
-    global alerts
+# ---------- MARKET DASHBOARD ----------
+def market_dashboard():
+    watchlist = ["EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NZDUSD", "EURJPY", "GBPJPY", "BTCUSD", "ETHUSD"]
 
-    triggered = []
+    msg = "📊 MARKET DASHBOARD\n\n"
 
-    for alert in alerts:
-        current = get_price(alert["pair"])
+    for p in watchlist:
+        price = get_price(p)
+        if price:
+            msg += f"{p}: {price}\n"
+        else:
+            msg += f"{p}: N/A\n"
 
-        if current is None:
-            continue
+    return msg
 
-        hit = False
-
-        if alert["direction"] == "above" and current >= alert["target"]:
-            hit = True
-
-        if alert["direction"] == "below" and current <= alert["target"]:
-            hit = True
-
-        if hit:
-            send(
-                alert["chat_id"],
-                f"🚨 {alert['pair']} reached {alert['target']}\nCurrent: {current}"
-            )
-            triggered.append(alert)
-
-    for item in triggered:
-        alerts.remove(item)
-
-# ---------- MAIN LOOP ----------
+# ---------- BOT LOOP ----------
 def bot_loop():
     offset = None
-    print("Trading bot started...")
+    print("Trading bot running...")
 
     while True:
         try:
@@ -108,69 +123,25 @@ def bot_loop():
                     chat_id = u["message"]["chat"]["id"]
                     text = u["message"].get("text", "").upper().strip()
 
-                    # ----- SET ALERT -----
-                    if text.startswith("ALERT"):
-                        parts = text.split()
-
-                        if len(parts) == 3:
-                            pair = parts[1]
-                            target = float(parts[2])
-
-                            current = get_price(pair)
-
-                            if current is None:
-                                send(chat_id, "❌ Invalid pair")
-                                continue
-
-                            direction = "above" if target > current else "below"
-
-                            alerts.append({
-                                "chat_id": chat_id,
-                                "pair": pair,
-                                "target": target,
-                                "direction": direction
-                            })
-
-                            send(
-                                chat_id,
-                                f"✅ Alert set for {pair} at {target}"
-                            )
-                            continue
-
-                    # ----- VIEW ALERTS -----
-                    if text == "ALERTS":
-                        if not alerts:
-                            send(chat_id, "No active alerts.")
-                        else:
-                            msg = "📌 Active Alerts:\n"
-                            for a in alerts:
-                                if a["chat_id"] == chat_id:
-                                    msg += f"{a['pair']} @ {a['target']}\n"
-                            send(chat_id, msg)
+                    # ---------- MARKET DASHBOARD ----------
+                    if text == "MARKET":
+                        send(chat_id, market_dashboard())
                         continue
 
-                    # ----- CLEAR ALERTS -----
-                    if text == "CLEAR ALERTS":
-                        alerts = [a for a in alerts if a["chat_id"] != chat_id]
-                        send(chat_id, "🗑 Alerts cleared.")
-                        continue
-
-                    # ----- PRICE CHECK -----
+                    # ---------- PRICE CHECK ----------
                     price = get_price(text)
 
                     if price:
                         send(chat_id, f"📊 {text}\n💰 Price: {price}")
-                        continue
-
-                    send(chat_id, "Send:\nEURUSD\nALERT EURUSD 1.0900")
-
-            check_alerts()
+                    else:
+                        send(chat_id, "Commands:\nMARKET\nEURUSD\nGBPJPY\nBTCUSD")
 
         except Exception as e:
-            print("Error:", e)
+            print("Bot error:", e)
 
-        time.sleep(5)
+        time.sleep(3)
 
+# ---------- START ----------
 if __name__ == "__main__":
     threading.Thread(target=bot_loop, daemon=True).start()
 
